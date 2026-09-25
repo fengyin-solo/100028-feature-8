@@ -20,14 +20,42 @@ STATUSES = ["待定妆", "已定妆", "使用中", "已归还"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按服装编号检索"),
     status: str | None = Query(default=None, description="待定妆、已定妆、使用中、已归还"),
+    服装编号: str | None = Query(default=None, description="筛选栏字段：按服装编号包含匹配"),
+    服装名称: str | None = Query(default=None, description="筛选栏字段：按服装名称包含匹配"),
+    角色归属: str | None = Query(default=None, description="筛选栏字段：按角色归属包含匹配"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按服装编号与状态过滤服装造型列表；没有数据时返回空页，不报错。"""
+    """按筛选栏条件过滤服装造型列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    field_filters = {"服装编号": 服装编号, "服装名称": 服装名称, "角色归属": 角色归属}
+    field_filters = {field: value for field, value in field_filters.items() if value}
+    items, total = service.list_entries(keyword=keyword, status=status, field_filters=field_filters, page=page, size=size)
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+# 静态路径要排在 /{entry_id} 之前，否则 "draft"、"export" 会被当成戏服编号拦下。
+@router.get("/draft", response_model=dict)
+def get_draft() -> dict[str, Any]:
+    """读取当前筛选、正在处理的戏服与未提交清洗记录；没保存过时返回空草稿。"""
+    return service.get_draft()
+
+
+@router.put("/draft", response_model=ActionResult)
+def save_draft(payload: EntryPayload) -> ActionResult:
+    """整体保存草稿；校验不通过时已有草稿原样保留，不被失败请求覆盖。"""
+    draft, message = service.save_draft(payload.values)
+    if draft is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=draft)
+
+
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出服装造型清单：返回当前过滤条件下的全量数据。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "costume", "total": total, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -58,8 +86,21 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     return ActionResult(ok=True, message=message, entry=entry)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出服装造型清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "costume", "total": total, "items": items}
+@router.post("/{entry_id}/cleaning", response_model=ActionResult)
+def submit_cleaning(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """提交一条清洗记录；同一提交标识或相同内容只登记一次，失败时不改动已有记录。"""
+    content = str(payload.values.get("content") or "")
+    submission_id = str(payload.values.get("submission_id") or "").strip()
+    entry, message = service.submit_cleaning(entry_id, content, submission_id)
+    if entry is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=entry)
+
+
+@router.get("/{entry_id}/cleaning", response_model=dict)
+def list_cleaning(entry_id: int) -> dict[str, Any]:
+    """读出某件戏服的历史清洗记录，刷新页面后依然可查。"""
+    records, message = service.list_cleaning(entry_id)
+    if records is None:
+        raise HTTPException(status_code=404, detail=message)
+    return {"items": records, "total": len(records)}
