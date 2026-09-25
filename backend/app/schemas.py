@@ -19,6 +19,7 @@ class ActionResult(BaseModel):
     ok: bool
     message: str
     entry: dict[str, Any] | None = None
+    replayed: bool = False  # True 表示命中幂等回放，状态没有再落一次
 
 
 class EntryPayload(BaseModel):

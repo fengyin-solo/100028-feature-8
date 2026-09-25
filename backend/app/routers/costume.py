@@ -1,4 +1,4 @@
-"""服装造型接口：维护戏服，覆盖安排定妆、确认使用、归还服装等动作。"""
+"""服装造型接口：维护戏服，覆盖安排定妆、确认使用、归还服装与清洗记录。"""
 from __future__ import annotations
 
 from typing import Any
@@ -30,9 +30,17 @@ def list_entries(
     return PageResult(items=items, total=total, page=page, size=size)
 
 
+# 注意：静态路径要排在 /{entry_id} 之前，否则「export」会被当成戏服 id 解析。
+@router.get("/export")
+def export_entries() -> dict[str, Any]:
+    """导出服装造型清单：返回全量数据（含清洗历史）。"""
+    items, total = service.list_entries(page=1, size=10000)
+    return {"module": "costume", "total": total, "items": items}
+
+
 @router.get("/{entry_id}", response_model=dict)
 def get_entry(entry_id: int) -> dict:
-    """读取单条戏服明细；不存在时给出可读的错误说明。"""
+    """读取单条戏服明细（含归还时间与清洗历史）；不存在时给出可读的错误说明。"""
     entry = service.get_entry(entry_id)
     if entry is None:
         raise HTTPException(status_code=404, detail=f"戏服 {entry_id} 不存在或已归档")
@@ -50,16 +58,37 @@ def create_entry(payload: EntryPayload) -> ActionResult:
 
 @router.post("/{entry_id}/actions", response_model=ActionResult)
 def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
-    """对单条戏服执行安排定妆、确认使用、归还服装；不允许的动作会被拦下并说明原因。"""
+    """对单条戏服执行安排定妆、确认使用、归还服装。
+
+    values.request_id 为幂等键：同一件戏服带同一个键重复提交只生效一次，
+    后续重复请求回放首次回执，不会再改状态。
+    """
     action = str(payload.values.get("action") or "").strip()
-    entry, message = service.run_action(entry_id, action)
+    request_id = str(payload.values.get("request_id") or "").strip() or None
+    entry, message, replayed = service.run_action(entry_id, action, request_id)
     if entry is None:
         return ActionResult(ok=False, message=message)
-    return ActionResult(ok=True, message=message, entry=entry)
+    return ActionResult(ok=True, message=message, entry=entry, replayed=replayed)
 
 
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出服装造型清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "costume", "total": total, "items": items}
+@router.get("/{entry_id}/cleaning", response_model=dict)
+def list_cleaning(entry_id: int) -> dict[str, Any]:
+    """查询某件戏服的历史清洗记录，归还后随时可查。"""
+    records, message = service.list_cleaning(entry_id)
+    if records is None:
+        raise HTTPException(status_code=404, detail=message)
+    return {"entry_id": entry_id, "total": len(records), "items": records}
+
+
+@router.post("/{entry_id}/cleaning", response_model=ActionResult)
+def add_cleaning(entry_id: int, payload: EntryPayload) -> ActionResult:
+    """为已归还戏服登记清洗记录。
+
+    values.request_id 为幂等键：网络重试或重复点击只追加一条记录。
+    """
+    values = dict(payload.values)
+    request_id = str(values.pop("request_id", "") or "").strip() or None
+    record, message, replayed = service.add_cleaning(entry_id, values, request_id)
+    if record is None:
+        return ActionResult(ok=False, message=message)
+    return ActionResult(ok=True, message=message, entry=record, replayed=replayed)
